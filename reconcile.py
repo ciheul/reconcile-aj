@@ -1,17 +1,20 @@
+from local import config
+
 from django.conf import settings
 
 settings.configure(
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.postgresql_psycopg2',
-            'NAME': 'axes-clone-live',
-            'USER': 'winnuayi',
-            'PASSWORD': '',
-            'HOST': 'localhost',
-            'PORT': '5432',
+            'NAME': config.NAME,
+            'USER': config.USERNAME,
+            'PASSWORD': config.PASSWORD,
+            'HOST': config.HOST,
+            'PORT': config.PORT,
         }
     }
 )
+    
 
 import os
 import os.path
@@ -20,16 +23,36 @@ sys.path.append(os.path.join('.', 'gen-py'))
 
 from adm.models import Transaction
 import parser
-import config
 from ftp_manager import FtpManager
 
 from datetime import datetime, time, timedelta
 import logging
+from logging.handlers import TimedRotatingFileHandler
 import shutil
 
+from redis import Redis
+from rq_scheduler import Scheduler
 
+
+# python-RQ Scheduler
+scheduler = Scheduler(connection=Redis())
+
+# LOGGER
+LOG_FOLDER = '../log/reconcile'
+LOG_NAME = os.path.join(LOG_FOLDER, 'reconcile.log')
 LOG_FORMAT = "%(asctime)s %(levelname)s - %(message)s"
-logging.basicConfig(format=LOG_FORMAT, level=logging.INFO, datefmt="%Y-%m-%d %I:%M:%S")
+
+logger = logging.getLogger("Rotating Log")
+logger.setLevel(logging.INFO)
+
+handler = TimedRotatingFileHandler(LOG_NAME, when="midnight")
+
+formatter = logging.Formatter(fmt=LOG_FORMAT, datefmt="%Y-%m-%d %I:%M:%S")
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+#logging.basicConfig(filename=LOG_NAME, format=LOG_FORMAT,
+#                    level=logging.INFO, datefmt="%Y-%m-%d %I:%M:%S")
 
 class Reconcile:
     header_postpaid = 'DT|SWITCHERID|MERCHANT|REFNUM|SREFNUM|IDPEL|BL_TH|TRAN_AMOUNT|RP_TAG|RP_INSENTIF|VAT|RP_BK|BANKCODE'
@@ -58,7 +81,6 @@ class Reconcile:
         self.parser = parser.ParserImpl()
 
         self.ftp = FtpManager()
-        self.logger = logging.getLogger()
 
         # for ftr
         self.ftr_postpaid = None
@@ -72,6 +94,7 @@ class Reconcile:
         self.ftr_ctl_name = None
 
     def parse_bill_number(self, bill_number):
+        """Returns product code and bill_number."""
         if '#' in bill_number:
             split = bill_number.split('#')
             product_code = int(split[0])
@@ -166,159 +189,176 @@ class Reconcile:
             'amount': 0,
         }
 
+        today = datetime.now().date()
+        yesterday = today - timedelta(days=1)
+
         # TODO filter based on date
         # this loop filters line for postpaid, prepaid, and nontaglis in a loop
         # for the performance purpose.
-        for i in Transaction.objects.filter(
-                product__internal_code__contains='PLN').order_by('timestamp'):
-            if i.status != 3: continue
+        try:
+            for i in Transaction.objects.filter(
+                    product__internal_code__contains='PLN') \
+                        .order_by('timestamp'):
+                # status fail or pending is ignored
+                if i.status != 3: continue
 
-            product_code, bill_number = self.parse_bill_number(i.bill_number)
+                product_code, bill_number = \
+                    self.parse_bill_number(i.bill_number)
 
-            result = self.parser.parse_bit61(i.product.biller.code,
-                                             product_code,
-                                             bill_number,
-                                             i.bit_48)
+                result = self.parser.parse_bit61(i.product.biller.code,
+                                                 product_code,
+                                                 bill_number,
+                                                 i.bit_48)
 
-            if result is Exception: continue
+                if result is Exception: continue
 
-            p = result['unstructured']
-            #for j in p: print j, p[j]
+                p = result['unstructured']
+                #for j in p: print j, "[" + str(p[j]) + "]"
+                #print "==================="
 
-            # generate reconcile line for postpaid 
-            if product_code == 4:
-                total_bill = int(p["Jumlah Tagihan Belum Lunas"])
-                if total_bill > 4:
-                    total_bill = 4
+                # generate reconcile line for postpaid 
+                if product_code == 4:
+                    total_bill = int(p["Jumlah Tagihan Belum Lunas"])
+                    if total_bill > 4:
+                        total_bill = 4
 
-                # a bit48 could contain more than one transaction
-                for j in range(total_bill):
-                    total_amount = int(p["Tagihan Listrik"][j]) \
-                        + int(p["Denda"][j])
+                    # a bit48 could contain more than one transaction
+                    for j in range(total_bill):
+                        total_amount = int(p["Tagihan Listrik"][j]) \
+                            + int(p["Denda"][j])
 
-                    # add zero left-padding
+                        # add zero left-padding
+                        str_total_amount = self.add_zero_padding(total_amount, 
+                                                                 12)
+
+                        # aggregate fields
+                        post_aggregate['counter'] += 1
+                        post_aggregate['amount'] += total_amount
+                        post_aggregate['total'] += int(p["Tagihan Listrik"][j])
+
+                        if p["Kode Insentif Disinsentif"][j] == "D":
+                            post_aggregate['ins_dis'] += \
+                                int(p["Tagihan Listrik"][j])
+                        else:
+                            post_aggregate['ins_dis'] -= \
+                                int(p["Tagihan Listrik"][j])
+
+                        post_aggregate['vat'] += \
+                            int(p["Pajak Nilai Tambah"][j])
+                        post_aggregate['penalty'] += int(p["Denda"][j])
+
+                        # build rp insentif from 'kode' and 'nilai' 
+                        rp_insentif = str()
+                        if p["Kode Insentif Disinsentif"][j] == "D":
+                            rp_insentif += '+'
+                        else:
+                            rp_insentif += '-'
+                        rp_insentif += p["Nilai Insentif Disinsentif"][j]
+
+                        # construct a line
+                        line = "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" % (
+                            i.timestamp.strftime('%Y%m%d%H%M%S'),
+                            self.SWITCHER_ID,
+                            self.MERCHANT,
+                            p["Kode Referensi PLN"],
+                            p["Switcher Receipt Reference Number"],
+                            p["Identitas Pelanggan"],
+                            p["Periode Tagihan"][j],
+                            str_total_amount,
+                            p["Tagihan Listrik"][j],
+                            rp_insentif,
+                            p["Pajak Nilai Tambah"][j],
+                            p["Denda"][j],
+                            self.BANK_CODE,
+                        )
+
+                        # store in a list
+                        self.ftr_postpaid.append(line)
+
+                # generate reconcile line for prepaid
+                if product_code == 2:
+                    if p["Purchased KWH Unit"] == str():
+                        p["Purchased KWH Unit"] = 10 * '0'
+                    if p["Customer Payables Installment"] == str():
+                        p["Customer Payables Installment"] = 10 * '0'
+                    if p["Public Lightning Tax"] == str():
+                        p["Public Lightning Tax"] = 10 * '0'
+                    if p["Stamp Duty"] == str():
+                        p["Stamp Duty"] = 10 * '0'
+                    if p["Admin Charge"] == str():
+                        p["Admin Charge"] = 10 * '0'
+                    if p["Value Added Tax"] == str():
+                        p["Value Added Tax"] = 10 * '0'
+                    if p["Power Purchase"] == str():
+                        p["Power Purchase"] = 10 * '0'
+
+                    total_amount = int(p["Admin Charge"]) \
+                        + int(p["Stamp Duty"]) \
+                        + int(p["Public Lightning Tax"]) \
+                        + int(p["Customer Payables Installment"]) \
+                        + int(p["Purchased KWH Unit"])
+
                     str_total_amount = self.add_zero_padding(total_amount, 12)
 
-                    # aggregate fields
-                    post_aggregate['counter'] += 1
-                    post_aggregate['amount'] += total_amount
-                    post_aggregate['total'] += int(p["Tagihan Listrik"][j])
+                    pre_aggregate['counter'] += 1
+                    pre_aggregate['amount'] += total_amount
+                    pre_aggregate['admin_charge'] += int(p["Admin Charge"])
+                    pre_aggregate['stamp_duty'] += int(p["Stamp Duty"])
+                    pre_aggregate['vat'] += int(p["Value Added Tax"])
+                    pre_aggregate['plt'] += int(p["Public Lightning Tax"])
+                    pre_aggregate['cpi'] += \
+                        int(p["Customer Payables Installment"])
+                    pre_aggregate['power_purchase'] += int(p["Power Purchase"])
+                    pre_aggregate['purchased_kwh'] += \
+                        int(p["Purchased KWH Unit"])
 
-                    if p["Kode Insentif Disinsentif"][j] == "D":
-                        post_aggregate['ins_dis'] += \
-                            int(p["Tagihan Listrik"][j])
-                    else:
-                        post_aggregate['ins_dis'] -= \
-                            int(p["Tagihan Listrik"][j])
-
-                    post_aggregate['vat'] += int(p["Pajak Nilai Tambah"][j])
-                    post_aggregate['penalty'] += int(p["Denda"][j])
-
-                    # build rp insentif from 'kode' and 'nilai' 
-                    rp_insentif = str()
-                    if p["Kode Insentif Disinsentif"][j] == "D":
-                        rp_insentif += '+'
-                    else:
-                        rp_insentif += '-'
-                    rp_insentif += p["Nilai Insentif Disinsentif"][j]
-
-                    # construct a line
-                    line = "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" % (
+                    line = "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" % (
                         i.timestamp.strftime('%Y%m%d%H%M%S'),
                         self.SWITCHER_ID,
                         self.MERCHANT,
-                        p["Kode Referensi PLN"],
+                        p["PLN Reference Number"],
                         p["Switcher Receipt Reference Number"],
-                        p["Identitas Pelanggan"],
-                        p["Periode Tagihan"][j],
+                        p["Meter Serial Number"],
                         str_total_amount,
-                        p["Tagihan Listrik"][j],
-                        rp_insentif,
-                        p["Pajak Nilai Tambah"][j],
-                        p["Denda"][j],
+                        p["Admin Charge"],
+                        p["Stamp Duty"],
+                        p["Value Added Tax"],
+                        p["Public Lightning Tax"],
+                        p["Customer Payables Installment"],
+                        p["Power Purchase"],
+                        p["Purchased KWH Unit"],
+                        p["Token Number"],
                         self.BANK_CODE,
                     )
 
-                    # store in a list
-                    self.ftr_postpaid.append(line)
+                    self.ftr_prepaid.append(line)
 
-            # generate reconcile line for prepaid
-            if product_code == 2:
-                if p["Purchased KWH Unit"] == str():
-                    p["Purchased KWH Unit"] = 10 * '0'
-                if p["Customer Payables Installment"] == str():
-                    p["Customer Payables Installment"] = 10 * '0'
-                if p["Public Lightning Tax"] == str():
-                    p["Public Lightning Tax"] = 10 * '0'
-                if p["Stamp Duty"] == str():
-                    p["Stamp Duty"] = 10 * '0'
-                if p["Admin Charge"] == str():
-                    p["Admin Charge"] = 10 * '0'
-                if p["Value Added Tax"] == str():
-                    p["Value Added Tax"] = 10 * '0'
-                if p["Power Purchase"] == str():
-                    p["Power Purchase"] = 10 * '0'
+                # generate reconcile line for NTL
+                if product_code == 3:
+                    ntl_aggregate['counter'] += 1
+                    ntl_aggregate['amount'] += int(p["Nilai Total Amount"])
 
-                total_amount = int(p["Admin Charge"]) \
-                    + int(p["Stamp Duty"]) \
-                    + int(p["Public Lightning Tax"]) \
-                    + int(p["Customer Payables Installment"]) \
-                    + int(p["Purchased KWH Unit"])
+                    line = "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" % (
+                        i.timestamp.strftime('%Y%m%d%H%M%S'),
+                        self.SWITCHER_ID,
+                        self.MERCHANT,
+                        p["Kode Referensi Transaksi"],
+                        p["Switcher Receipt Reference Number"],
+                        p["ID Pelanggan"],
+                        p["Nomor Registrasi"],
+                        p["Registration Date"],
+                        p["Transaction Code"],
+                        p["Nilai Total Amount"],
+                        self.BANK_CODE,
+                    )
 
-                str_total_amount = self.add_zero_padding(total_amount, 12)
+                    self.ftr_nontaglis.append(line)
 
-                pre_aggregate['counter'] += 1
-                pre_aggregate['amount'] += total_amount
-                pre_aggregate['admin_charge'] += int(p["Admin Charge"])
-                pre_aggregate['stamp_duty'] += int(p["Stamp Duty"])
-                pre_aggregate['vat'] += int(p["Value Added Tax"])
-                pre_aggregate['plt'] += int(p["Public Lightning Tax"])
-                pre_aggregate['cpi'] += \
-                    int(p["Customer Payables Installment"])
-                pre_aggregate['power_purchase'] += int(p["Power Purchase"])
-                pre_aggregate['purchased_kwh'] += int(p["Purchased KWH Unit"])
-
-                line = "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" % (
-                    i.timestamp.strftime('%Y%m%d%H%M%S'),
-                    self.SWITCHER_ID,
-                    self.MERCHANT,
-                    p["PLN Reference Number"],
-                    p["Switcher Receipt Reference Number"],
-                    p["Meter Serial Number"],
-                    str_total_amount,
-                    p["Admin Charge"],
-                    p["Stamp Duty"],
-                    p["Value Added Tax"],
-                    p["Public Lightning Tax"],
-                    p["Customer Payables Installment"],
-                    p["Power Purchase"],
-                    p["Purchased KWH Unit"],
-                    p["Token Number"],
-                    self.BANK_CODE,
-                )
-
-                self.ftr_prepaid.append(line)
-
-            # generate reconcile line for NTL
-            if product_code == 3:
-                ntl_aggregate['counter'] += 1
-                ntl_aggregate['amount'] += int(p["Nilai Total Amount"])
-
-                line = "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" % (
-                    i.timestamp.strftime('%Y%m%d%H%M%S'),
-                    self.SWITCHER_ID,
-                    self.MERCHANT,
-                    p["Kode Referensi Transaksi"],
-                    p["Switcher Receipt Reference Number"],
-                    p["ID Pelanggan"],
-                    p["Nomor Registrasi"],
-                    p["Registration Date"],
-                    p["Transaction Code"],
-                    p["Nilai Total Amount"],
-                    self.BANK_CODE,
-                )
-
-                self.ftr_nontaglis.append(line)
+            logger.info("Query database success.")
+        except:
+            logger.error("Fail to query database. Schedule task to restart.")
+            scheduler.enqueue_in(timedelta(minutes=config.INTERVAL), self.main)
+            sys.exit()
 
         now = datetime.now()
         # aggregate last line for postpaid
@@ -413,51 +453,56 @@ class Reconcile:
         ftrctl_ntl_name = "%s-50504-%s.ftr.ctl" % \
             (self.BANK_CODE, now.strftime('%Y%m%d'))
 
-        # TODO error handling when writing to disk fails
-        with open(os.path.join(self.FTR_QUEUE, ftr_post_name), 'w') as f:
-            for line in self.ftr_postpaid:
-                f.write(line + '\n')
-            logging.info("Dump %s" % \
-                os.path.join(self.FTR_QUEUE, ftr_post_name))
+        try:
+            with open(os.path.join(self.FTR_QUEUE, ftr_post_name), 'w') as f:
+                for line in self.ftr_postpaid:
+                    f.write(line + '\n')
+                logger.info("Dump %s" % \
+                    os.path.join(self.FTR_QUEUE, ftr_post_name))
 
-        with open(os.path.join(self.FTR_QUEUE, ftr_pre_name), 'w') as f:
-            for line in self.ftr_postpaid:
-                f.write(line + '\n')
-            logging.info("Dump %s" % \
-                os.path.join(self.FTR_QUEUE, ftr_pre_name))
+            with open(os.path.join(self.FTR_QUEUE, ftr_pre_name), 'w') as f:
+                for line in self.ftr_prepaid:
+                    f.write(line + '\n')
+                logger.info("Dump %s" % \
+                    os.path.join(self.FTR_QUEUE, ftr_pre_name))
 
-        with open(os.path.join(self.FTR_QUEUE, ftr_ntl_name), 'w') as f:
-            for line in self.ftr_nontaglis:
-                f.write(line + '\n')
-            logging.info("Dump %s" % \
-                os.path.join(self.FTR_QUEUE, ftr_ntl_name))
+            with open(os.path.join(self.FTR_QUEUE, ftr_ntl_name), 'w') as f:
+                for line in self.ftr_nontaglis:
+                    f.write(line + '\n')
+                logger.info("Dump %s" % \
+                    os.path.join(self.FTR_QUEUE, ftr_ntl_name))
 
-        with open(os.path.join(self.FTR_QUEUE, ftrctl_post_name), 'w') as f:
-            for line in self.ftrctl_postpaid:
-                f.write(line)
-            logging.info("Dump %s" % \
-                os.path.join(self.FTR_QUEUE, ftrctl_post_name))
+            with open(os.path.join(self.FTR_QUEUE, ftrctl_post_name), 'w') as f:
+                for line in self.ftrctl_postpaid:
+                    f.write(line)
+                logger.info("Dump %s" % \
+                    os.path.join(self.FTR_QUEUE, ftrctl_post_name))
 
-        with open(os.path.join(self.FTR_QUEUE, ftrctl_pre_name), 'w') as f:
-            for line in self.ftrctl_prepaid:
-                f.write(line)
-            logging.info("Dump %s" % \
-                os.path.join(self.FTR_QUEUE, ftrctl_pre_name))
+            with open(os.path.join(self.FTR_QUEUE, ftrctl_pre_name), 'w') as f:
+                for line in self.ftrctl_prepaid:
+                    f.write(line)
+                logger.info("Dump %s" % \
+                    os.path.join(self.FTR_QUEUE, ftrctl_pre_name))
 
-        with open(os.path.join(self.FTR_QUEUE, ftrctl_ntl_name), 'w') as f:
-            for line in self.ftrctl_nontaglis:
-                f.write(line)
-            logging.info("Dump %s" % \
-                os.path.join(self.FTR_QUEUE, ftrctl_ntl_name))
+            with open(os.path.join(self.FTR_QUEUE, ftrctl_ntl_name), 'w') as f:
+                for line in self.ftrctl_nontaglis:
+                    f.write(line)
+                logger.info("Dump %s" % \
+                    os.path.join(self.FTR_QUEUE, ftrctl_ntl_name))
 
-        # push to buffer
-        self.ftr_ctl_name = list()
-        self.ftr_ctl_name.append(ftr_post_name)
-        self.ftr_ctl_name.append(ftr_pre_name)
-        self.ftr_ctl_name.append(ftr_ntl_name)
-        self.ftr_ctl_name.append(ftrctl_post_name)
-        self.ftr_ctl_name.append(ftrctl_pre_name)
-        self.ftr_ctl_name.append(ftrctl_ntl_name)
+            # push to buffer
+            self.ftr_ctl_name = list()
+            self.ftr_ctl_name.append(ftr_post_name)
+            self.ftr_ctl_name.append(ftr_pre_name)
+            self.ftr_ctl_name.append(ftr_ntl_name)
+            self.ftr_ctl_name.append(ftrctl_post_name)
+            self.ftr_ctl_name.append(ftrctl_pre_name)
+            self.ftr_ctl_name.append(ftrctl_ntl_name)
+            logger.info("Dump success.")
+        except IOError:
+            scheduler.enqueue_in(timedelta(minutes=config.INTERVAL), self.main)
+            logger.error("Dumping to disk fails. Schedule task to restart.")
+            sys.exit()
 
     def upload(self):
         """Upload FTR and FTR.CTL file."""
@@ -467,38 +512,89 @@ class Reconcile:
         if not os.path.exists(self.FTR_LOCAL):
             os.mkdir(self.FTR_LOCAL)
 
-        self.ftp.connect()
+        #job_id = scheduler.enqueue_in(timedelta(minutes=1), self.upload)
+        #print job_id
 
-        # upload any files remaining in the queue,
-        # either it is new or from previous days
-        for i in os.listdir(self.FTR_QUEUE):
-            src = os.path.join(self.FTR_QUEUE, i)
-            dst = os.path.join(self.FTR_LOCAL, i)
-            logging.info("Uploading %s" % src)
-            self.ftp.upload_ftr(src)
-            self.move(src, dst)
-            #shutil.move(src, dst)
-            #logging.info("Move %s to %s" % (src, dst))
-        self.ftp.disconnect()
-    
+        status = self.ftp.connect()
+
+        if status == FtpManager.SUCCESS:
+            # upload any files remaining in the queue,
+            # either it is new or from previous days
+            for i in os.listdir(self.FTR_QUEUE):
+                src = os.path.join(self.FTR_QUEUE, i)
+                dst = os.path.join(self.FTR_LOCAL, i)
+
+                # upload to server
+                status = self.ftp.upload_ftr(src)
+                if status == FtpManager.FAIL:
+                    break
+                logger.info("Upload %s" % src)
+
+                # move uploaded file from queue folder to ftr folder
+                self.move(src, dst)
+
+            self.ftp.disconnect()
+        else:
+            logger.error("Fail to connect FTP server.")
+
+        # when fail occurs, schedule next upload task in a few minutes
+        # NOTE this lines MUST be outside from self.ftp.connect and disconnect
+        # otherwise, scheduled task will output error.
+        if status == FtpManager.FAIL:
+            scheduler.enqueue_in(timedelta(minutes=1), self.main)
+            logger.error("Upload fail. Schedule task to restart.")
+        else:
+            logger.info("Upload success.")
+ 
     def download(self):
         """Download FCN file."""
-        pass
+        if not os.path.exists(self.FCN_LOCAL):
+            os.mkdir(self.FCN_LOCAL)
+
+        status = self.ftp.connect()
+
+        if status == FtpManager.SUCCESS:
+            # get current date
+            now = datetime.now().strftime('%Y%m%d')
+
+            # download the fcn and fcn.ctl
+            for i in [1, 2, 4]:
+                for ext in ['ftr', 'ftr.ctl']:
+                    filename = '000735-5050%d-%s.%s' % (i, now, ext)
+                    logger.info("Download %s" % filename)
+                    status = self.ftp.download_fcn(filename)
+                    if status == FtpManager.FAIL:
+                        break
+            self.ftp.disconnect()
+        else:
+            logger.error("Fail to connect FTP server.")
+
+        if status == FtpManager.FAIL:
+            scheduler.enqueue_in(timedelta(minutes=config.INTERVAL), self.main)
+            logger.error("Download fail. Schedule task to restart.")
+        else:
+            logger.info("Download success.")
 
     def move(self, src, dst):
         """Move an uploaded file from queue to ftr."""
         shutil.move(src, dst)
-        logging.info("Move %s to %s" % (src, dst))
+        logger.debug("Move %s to %s" % (src, dst))
 
     def main(self):
+        # create a log folder for reconcile
+        if not os.path.exists(LOG_FOLDER):
+            os.mkdir(LOG_FOLDER)
+        
         self.generate_ftr_ctl()
         self.dump_ftr_ctl()
         self.upload()
 
+        self.download()
+
         now = datetime.now()
 
         # step 2. CA upload ftr and ftr.ctl
-        if time(0, 0, 0) <= now.time() <= time(1, 0, 0):
+        if time(0, 0, 0) <= now.time() <= time(8, 30, 0):
              self.generate_ftr_ctl()
              self.dump_ftr_ctl()
 

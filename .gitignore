@@ -1,1 +1,6 @@
+*.rdb
 *.pyc
+fcn/
+ftr/
+local/
+queue/
