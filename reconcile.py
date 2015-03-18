@@ -39,6 +39,9 @@ scheduler = Scheduler(connection=Redis())
 
 # LOGGER
 LOG_FOLDER = '../log/reconcile'
+if not os.path.exists(LOG_FOLDER):
+    os.mkdir(LOG_FOLDER)
+
 LOG_NAME = os.path.join(LOG_FOLDER, 'reconcile.log')
 LOG_FORMAT = "%(asctime)s %(levelname)s - %(message)s"
 
@@ -47,7 +50,7 @@ logger.setLevel(logging.INFO)
 
 handler = TimedRotatingFileHandler(LOG_NAME, when="midnight")
 
-formatter = logging.Formatter(fmt=LOG_FORMAT, datefmt="%Y-%m-%d %I:%M:%S")
+formatter = logging.Formatter(fmt=LOG_FORMAT, datefmt="%Y-%m-%d %H:%M:%S")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
@@ -152,6 +155,7 @@ class Reconcile:
         return holidays
 
     def generate_ftr_ctl(self):
+        print "GENERATE_FTR_CTL"
         """Generate ftr and ftr.ctl and store to list."""
         # for ftr
         self.ftr_postpaid = list()
@@ -189,13 +193,13 @@ class Reconcile:
             'amount': 0,
         }
 
-        today = datetime.now().date()
-        yesterday = today - timedelta(days=1)
-
         # TODO filter based on date
         # this loop filters line for postpaid, prepaid, and nontaglis in a loop
         # for the performance purpose.
         try:
+            today = datetime.now().date()
+            yesterday = today - timedelta(days=1)
+
             for i in Transaction.objects.filter(
                     product__internal_code__contains='PLN') \
                         .order_by('timestamp'):
@@ -585,9 +589,9 @@ class Reconcile:
         if not os.path.exists(LOG_FOLDER):
             os.mkdir(LOG_FOLDER)
         
-        self.generate_ftr_ctl()
-        self.dump_ftr_ctl()
-        self.upload()
+        #self.generate_ftr_ctl()
+        #self.dump_ftr_ctl()
+        #self.upload()
 
         self.download()
 
