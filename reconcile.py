@@ -155,7 +155,6 @@ class Reconcile:
         return holidays
 
     def generate_ftr_ctl(self):
-        print "GENERATE_FTR_CTL"
         """Generate ftr and ftr.ctl and store to list."""
         # for ftr
         self.ftr_postpaid = list()
@@ -200,8 +199,12 @@ class Reconcile:
             today = datetime.now().date()
             yesterday = today - timedelta(days=1)
 
+            # query all yesterday's transactions
             for i in Transaction.objects.filter(
-                    product__internal_code__contains='PLN') \
+                    product__internal_code__contains='PLN',
+                    timestamp__year=yesterday.year,
+                    timestamp__month=yesterday.month,
+                    timestamp__day=yesterday.day) \
                         .order_by('timestamp'):
                 # status fail or pending is ignored
                 if i.status != 3: continue
@@ -563,7 +566,7 @@ class Reconcile:
 
             # download the fcn and fcn.ctl
             for i in [1, 2, 4]:
-                for ext in ['ftr', 'ftr.ctl']:
+                for ext in ['fcn', 'fcn.ctl']:
                     filename = '000735-5050%d-%s.%s' % (i, now, ext)
                     logger.info("Download %s" % filename)
                     status = self.ftp.download_fcn(filename)
@@ -589,24 +592,17 @@ class Reconcile:
         if not os.path.exists(LOG_FOLDER):
             os.mkdir(LOG_FOLDER)
         
-        #self.generate_ftr_ctl()
-        #self.dump_ftr_ctl()
-        #self.upload()
-
-        self.download()
-
         now = datetime.now()
 
-        # step 2. CA upload ftr and ftr.ctl
+        # step 2. CA upload ftr and ftr.ctl between 0:00 and 8:30
         if time(0, 0, 0) <= now.time() <= time(8, 30, 0):
              self.generate_ftr_ctl()
              self.dump_ftr_ctl()
 
              if now.today() not in self.get_holidays() \
                      or now.today() not in [self.FRI, self.SAT, self.SUN]:
-                 for i in get_all_buffer():
-                     self.upload()
-        # step 5. CA downloads fcn
+                 self.upload()
+        # step 5. CA downloads fcn and fcn.ctl between 12:00 and 13:00
         elif time(12, 0, 0) <= now.time() <= time(13, 0, 0):
              self.download()
 
