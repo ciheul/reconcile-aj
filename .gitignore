@@ -1,6 +1,7 @@
 *.rdb
 *.pyc
 nohup.out
+python.log
 fcn/
 ftr/
 local/
