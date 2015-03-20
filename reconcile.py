@@ -116,6 +116,11 @@ class Reconcile:
         zero_padded = length - len(str(n))
         return zero_padded * '0' + str(n)
 
+    def add_space_right_padding(self, n, length):
+        """Return text with space right padding."""
+        space_padded = length - len(str(n))
+        return str(n) + space_padded * ' '
+
     def determine_reconcile_type(self):
         """ Return reconcile type.
             1 == Monday, Tuesday, Wednesday, Thursday
@@ -268,15 +273,16 @@ class Reconcile:
                             self.SWITCHER_ID,
                             self.MERCHANT,
                             p["Kode Referensi PLN"],
-                            p["Switcher Receipt Reference Number"],
+                            self.add_space_right_padding( \
+                                p["Switcher Receipt Reference Number"], 32),
                             p["Identitas Pelanggan"],
                             p["Periode Tagihan"][j],
                             str_total_amount,
-                            p["Tagihan Listrik"][j],
+                            p["Tagihan Listrik"][j][-11:],
                             rp_insentif,
                             p["Pajak Nilai Tambah"][j],
                             p["Denda"][j],
-                            self.BANK_CODE,
+                            self.add_zero_padding(self.BANK_CODE, 7)
                         )
 
                         # store in a list
@@ -324,7 +330,8 @@ class Reconcile:
                         self.SWITCHER_ID,
                         self.MERCHANT,
                         p["PLN Reference Number"],
-                        p["Switcher Receipt Reference Number"],
+                        self.add_space_right_padding( \
+                            p["Switcher Receipt Reference Number"], 32),
                         p["Meter Serial Number"],
                         str_total_amount,
                         p["Admin Charge"],
@@ -335,7 +342,7 @@ class Reconcile:
                         p["Power Purchase"],
                         p["Purchased KWH Unit"],
                         p["Token Number"],
-                        self.BANK_CODE,
+                        self.add_zero_padding(self.BANK_CODE, 7)
                     )
 
                     self.ftr_prepaid.append(line)
@@ -350,19 +357,21 @@ class Reconcile:
                         self.SWITCHER_ID,
                         self.MERCHANT,
                         p["Kode Referensi Transaksi"],
-                        p["Switcher Receipt Reference Number"],
+                        self.add_space_right_padding( \
+                            p["Switcher Receipt Reference Number"], 32),
                         p["ID Pelanggan"],
                         p["Nomor Registrasi"],
                         p["Registration Date"],
-                        p["Transaction Code"],
+                        # ensure only two most-right characters
+                        p["Transaction Code"][-2:],
                         p["Nilai Total Amount"],
-                        self.BANK_CODE,
+                        self.add_zero_padding(self.BANK_CODE, 7)
                     )
 
                     self.ftr_nontaglis.append(line)
 
             logger.info("Query database success.")
-        except:
+        except IOError:
             logger.error("Fail to query database. Schedule task to restart.")
             scheduler.enqueue_in(timedelta(minutes=config.INTERVAL), self.main)
             sys.exit()
@@ -506,7 +515,7 @@ class Reconcile:
             self.ftr_ctl_name.append(ftrctl_pre_name)
             self.ftr_ctl_name.append(ftrctl_ntl_name)
             logger.info("Dump success.")
-        except IOError:
+        except:
             scheduler.enqueue_in(timedelta(minutes=config.INTERVAL), self.main)
             logger.error("Dumping to disk fails. Schedule task to restart.")
             sys.exit()
@@ -592,6 +601,11 @@ class Reconcile:
         if not os.path.exists(LOG_FOLDER):
             os.mkdir(LOG_FOLDER)
         
+        #self.generate_ftr_ctl()
+        #self.dump_ftr_ctl()
+        #self.upload()
+        #self.download()
+
         now = datetime.now()
 
         # step 2. CA upload ftr and ftr.ctl between 0:00 and 8:30
