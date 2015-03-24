@@ -64,7 +64,7 @@ class Reconcile:
     
     SWITCHER_ID = 'AJ100A3'
     MERCHANT = '6021'
-    BANK_CODE = '000735'
+    BANK_CODE = '0000735'
 
     RECONCILE_1 = 1
     RECONCILE_2 = 2 
@@ -250,10 +250,10 @@ class Reconcile:
 
                         if p["Kode Insentif Disinsentif"][j] == "D":
                             post_aggregate['ins_dis'] += \
-                                int(p["Tagihan Listrik"][j])
+                                int(p["Nilai Insentif Disinsentif"][j])
                         else:
                             post_aggregate['ins_dis'] -= \
-                                int(p["Tagihan Listrik"][j])
+                                int(p["Nilai Insentif Disinsentif"][j])
 
                         post_aggregate['vat'] += \
                             int(p["Pajak Nilai Tambah"][j])
@@ -282,7 +282,7 @@ class Reconcile:
                             rp_insentif,
                             p["Pajak Nilai Tambah"][j],
                             p["Denda"][j],
-                            self.add_zero_padding(self.BANK_CODE, 7)
+                            self.BANK_CODE,
                         )
 
                         # store in a list
@@ -342,7 +342,7 @@ class Reconcile:
                         p["Power Purchase"],
                         p["Purchased KWH Unit"],
                         p["Token Number"],
-                        self.add_zero_padding(self.BANK_CODE, 7)
+                        self.BANK_CODE
                     )
 
                     self.ftr_prepaid.append(line)
@@ -365,7 +365,7 @@ class Reconcile:
                         # ensure only two most-right characters
                         p["Transaction Code"][-2:],
                         p["Nilai Total Amount"],
-                        self.add_zero_padding(self.BANK_CODE, 7)
+                        self.BANK_CODE,
                     )
 
                     self.ftr_nontaglis.append(line)
@@ -377,6 +377,12 @@ class Reconcile:
             sys.exit()
 
         now = datetime.now()
+
+        if int(post_aggregate['ins_dis']) < 0:
+            sign = '-'
+        else:
+            sign = '+'
+
         # aggregate last line for postpaid
         last_line_post = "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" % (
             (now.date() + timedelta(days=1)).strftime('%Y%m%d000000'),
@@ -388,7 +394,7 @@ class Reconcile:
             self.add_zero_padding(0, 6),
             self.add_zero_padding(post_aggregate['amount'], 12),
             self.add_zero_padding(post_aggregate['total'], 11),
-            self.add_zero_padding(post_aggregate['ins_dis'], 12),
+            sign + self.add_zero_padding(post_aggregate['ins_dis'], 10),
             self.add_zero_padding(post_aggregate['vat'], 10),
             self.add_zero_padding(post_aggregate['penalty'], 9),
             self.BANK_CODE,
@@ -406,14 +412,14 @@ class Reconcile:
             '0000',
             self.add_zero_padding(pre_aggregate['counter'], 32),
             self.add_zero_padding(0, 32),
-            self.add_zero_padding(0, 12),
+            self.add_zero_padding(0, 11),
             self.add_zero_padding(pre_aggregate['amount'], 12),
             self.add_zero_padding(pre_aggregate['admin_charge'], 10),
             self.add_zero_padding(pre_aggregate['stamp_duty'], 10),
             self.add_zero_padding(pre_aggregate['vat'], 10),
             self.add_zero_padding(pre_aggregate['plt'], 10),
             self.add_zero_padding(pre_aggregate['cpi'], 10),
-            self.add_zero_padding(pre_aggregate['power_purchase'], 10),
+            self.add_zero_padding(pre_aggregate['power_purchase'], 12),
             self.add_zero_padding(pre_aggregate['purchased_kwh'], 10),
             self.add_zero_padding(0, 20),
             self.BANK_CODE,
