@@ -8,5 +8,8 @@
 # The fifth asterisk is for specifying the day of the week (where Sunday is equal to 0, up to Saturday is equal to 6)
 
 # please copy following lines to crontab
+
+LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib:/usr/local/pgsql/lib
+
 0   1   *   *   *   /Users/winnuayi/Projects/dev/backend/reconcile-aj/run.sh
 0   12   *   *   *   /Users/winnuayi/Projects/dev/backend/reconcile-aj/run.sh

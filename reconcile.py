@@ -577,14 +577,23 @@ class Reconcile:
 
         if status == FtpManager.SUCCESS:
             # get current date
-            now = datetime.now().strftime('%Y%m%d')
+            now = datetime.now().strftime('%y%m%d')
 
             # download the fcn and fcn.ctl
-            for i in [1, 2, 4]:
+            for i in [1, 2]:
                 for ext in ['fcn', 'fcn.ctl']:
-                    filename = '000735-5050%d-%s.%s' % (i, now, ext)
+                    filename = '%s-5050%d-%s.%s' % (self.BANK_CODE, i, now,
+                                                    ext)
                     logger.info("Download %s" % filename)
-                    status = self.ftp.download_fcn(filename)
+
+                    if i == 1:
+                        path = '/FCN/Postpaid'
+                    elif i == 2:
+                        path = '/FCN/Prepaid'
+                    else:
+                        # Nontaglis FCN files is yet provided by switcher
+                        break
+                    status = self.ftp.download_fcn(filename, path)
                     if status == FtpManager.FAIL:
                         break
             self.ftp.disconnect()
